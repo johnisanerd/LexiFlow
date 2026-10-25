@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import csv
 import argparse
@@ -15,6 +16,15 @@ DEFAULT_REGIONS = [
 ]
 
 DEFAULT_QUERIES = ["Personal Injury Law Firm", "Family Law Firm"]
+
+def split_city_state(address):
+    """
+    Pulls ("City", "ST") from a US address such as "100 Main St, Miami, FL 33131".
+    """
+    match = re.search(r"([^,]+),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?(?:,\s*(?:USA?|United States))?\s*$", address or "")
+    if not match:
+        return None, None
+    return match.group(1).strip(), match.group(2)
 
 class LeadSourcer:
     def __init__(self, apify_token=None, apollo_api_key=None):
@@ -43,28 +53,37 @@ class LeadSourcer:
         print(f"Starting Apify scrape for {len(search_queries)} queries...")
         
         # Example actor ID for Google Maps Scraper
-        actor_id = "compass/google-maps-scraper"
+        actor_id = "johnvc/google-maps-places-api"
         run_input = {
-            "searchStrings": search_queries,
-            "maxCrawledPlacesPerSearch": max_results,
+            "searchTerms": search_queries,
+            # The actor returns at least 20 places per search; extras are dropped below
+            "maxResultsPerSearch": max(max_results, 20),
             "language": "en",
         }
 
         # Run the actor and wait for it to finish
         run = self.apify_client.actor(actor_id).call(run_input=run_input)
+        # apify-client 3.x returns a Run object, 2.x returns a dict
+        dataset_id = run.default_dataset_id if hasattr(run, "default_dataset_id") else run["defaultDatasetId"]
 
         leads = []
-        for item in self.apify_client.dataset(run["defaultDatasetId"]).iterate_items():
+        per_search = {}
+        for item in self.apify_client.dataset(dataset_id).iterate_items():
+            term = item.get("searchTerm")
+            per_search[term] = per_search.get(term, 0) + 1
+            if per_search[term] > max_results:
+                continue
+            city, state = split_city_state(item.get("address"))
             lead = {
                 "name": item.get("title"),
                 "address": item.get("address"),
-                "city": item.get("city"),
-                "state": item.get("state"),
+                "city": city,
+                "state": state,
                 "website": item.get("website"),
-                "phone": item.get("phone"),
-                "category": item.get("categoryName"),
-                "rating": item.get("totalScore"),
-                "reviews_count": item.get("reviewsCount"),
+                "phone": item.get("phoneNumber"),
+                "category": item.get("type"),
+                "rating": item.get("rating"),
+                "reviews_count": item.get("ratingCount"),
             }
             leads.append(lead)
         
